@@ -3,81 +3,83 @@
 #include <numeric>
 #include <cassert>
 #include <sstream>
+#include <random>
+#include <algorithm>
 #include <mpi.h>
 #include <cstdio>
-#define getpid() 0
+#include <unistd.h>
 using namespace std;
-#define printgraph(graph) for(auto& i : graph) for(auto& j : i) cout << j << " "; cout << endl;
+#define BUFSIZE 1000
+void printgraph(int const &r, vector<vector<int>> const &g)
+{
+	fprintf(stderr, "Process %d:\n", r);
+	for (auto &i : g)
+	{
+		for (auto &j : i)
+		{
+			fprintf(stderr, "%d ", j);
+		}
+		fprintf(stderr, "\n");
+	}
+}
 int main(int argc, char *argv[])
 {
 	MPI_Init(&argc, &argv);
-	MPI_Comm intracomm, new_intracomm;
-	MPI_Comm_get_parent(&intracomm);
-	int world_rank, group_size, ierr;
+	MPI_Comm intracomm;
+	char *buf = new char[BUFSIZE]{0};
+	int world_rank, ierr;
 	MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
-	MPI_Comm_size(MPI_COMM_WORLD, &group_size);
-	fprintf(stderr, "Process %d spawned in group with size %d, ABS PID: %d\n", world_rank, group_size, getpid());
-	if (intracomm != MPI_COMM_NULL)
-		goto section;
-	else
-		goto init_section;
-init_section: //done only once by the master process which starts first.
-{
-	fprintf(stderr, "Process %d entered init_section\n", world_rank);
-	int abc, I_r, I_b;
+	fprintf(stderr, "Process %d PID: %d\n", world_rank, getpid());
+	// Now some IO
+	MPI_File infile;
+	// Open the input file in read-only mode.
+	MPI_File_open(MPI_COMM_WORLD, "inp-params.txt", MPI_MODE_RDONLY, MPI_INFO_NULL, &infile);
+	// Read info from the file. first into a char buffer and then into a stringstream.
+	MPI_File_read(infile, buf, BUFSIZE, MPI_CHAR, MPI_STATUS_IGNORE);
+	int N, I_r, I_b;
 	int W_r, W_b, L_b, L_r, L_snd, p, q;
-	fscanf(stdin, "%d %d %d %d %d %d %d %d %d %d", &abc, &W_r, &I_r, &W_b, &I_b, &L_b, &L_r, &L_snd, &p, &q);
-	fprintf(stderr, "Process%d: %d %d %d %d %d %d %d %d %d %d\n", world_rank, abc, W_r, I_r, W_b, I_b, L_b, L_r, L_snd, p, q);
-	getchar(); // to consume '\n' that remains.
-	vector<vector<int>> graph(abc);
+	stringstream instream(buf);
+	instream >> N >> W_r >> I_r >> W_b >> I_b >> L_b >> L_r >> L_snd >> p >> q;
+	fprintf(stderr, "Process %d: %d %d %d %d %d %d %d %d %d %d\n", world_rank, N, W_r, I_r, W_b, I_b, L_b, L_r, L_snd, p, q);
+	vector<vector<int>> graph(N);
 	string line;
-	for (int i = 0, temp; i < abc; i++)
+	for (int i = 0, src, dst; i < N; i++)
 	{
-		getline(cin, line);
+		getline(instream, line);
 		istringstream ss(line);
-		ss >> temp;
-		std::copy(istream_iterator<int>{ss}, istream_iterator<int>{}, std::back_inserter(graph[temp - 1]));
+		ss >> src;
+		while (ss >> dst)
+		{
+			graph[src - 1].push_back(dst - 1);
+		}
 		line.clear();
 	}
-	if (intracomm == MPI_COMM_NULL)
-	{
-		assert(group_size == 1);
-		fprintf(stderr, "Process %d entered spawning section\n", world_rank);
-		MPI_Comm intercomm;
-		fprintf(stderr, "Line 46: Process%d: %d %d %d %d %d %d %d %d %d %d\n", world_rank, abc, W_r, I_r, W_b, I_b, L_b, L_r, L_snd, p, q);
-		printgraph(graph);
-		MPI_Comm_spawn("a.out", MPI_ARGV_NULL, 4, MPI_INFO_NULL, 0, MPI_COMM_WORLD, &intercomm, &ierr);
-		fprintf(stderr, "Line 48: Process%d: %d %d %d %d %d %d %d %d %d %d\n", world_rank, abc, W_r, I_r, W_b, I_b, L_b, L_r, L_snd, p, q);
-		printgraph(graph);
-		// fprintf(stderr, "Process %d: N is %d\n",world_rank, N);
-		fprintf(stderr, "Line 49: Process %d: %d Processes created. &abc is %p\n", world_rank, abc, &abc);
-		MPI_Intercomm_merge(intercomm, 0, &intracomm);
-	}
-	// N processes in the same group with intracommunicator as intracomm.
-	// Now form the topology using MPI_Dist_Graph_Create
-	int *nodes = new int[abc];
-	int *degrees = new int[abc];
+	int *nodes = new int[N];
+	int *degrees = new int[N];
+	printgraph(world_rank, graph);
 	vector<int> targets;
-	std::iota(nodes, nodes + abc, 0);
-	for (int i = 0; i < abc; i++)
+	for (int i = 0; i < N; i++)
 	{
+		nodes[i] = i;
 		degrees[i] = graph[i].size();
 		targets.insert(targets.end(), graph[i].begin(), graph[i].end());
 	}
-	MPI_Dist_graph_create(intracomm, abc, nodes, degrees, targets.data(), MPI_WEIGHTS_EMPTY, MPI_INFO_NULL, 0, &new_intracomm);
-	fprintf(stderr, "Graph topology created by process %d", world_rank);
-}
+	MPI_File_close(&infile);
+	// END OF IO
+	// process 0 creates the graph topology.
+	if (world_rank == 0)
+	{
+		MPI_Dist_graph_create(MPI_COMM_WORLD, N, nodes, degrees, targets.data(), MPI_UNWEIGHTED, MPI_INFO_NULL, 0, &intracomm);
+		fprintf(stderr, "Graph topology created!\n");
+	}
+	else
+		MPI_Dist_graph_create(MPI_COMM_WORLD, 0, NULL, NULL, NULL, MPI_UNWEIGHTED, MPI_INFO_NULL, 0, &intracomm);
+	// fprintf(stderr, "Process %d entered barrier at line 56\n", world_rank);
+	MPI_Barrier(MPI_COMM_WORLD);
+	// fprintf(stderr, "Process %d exited barrier at line 58\n", world_rank);
+	vector<int> indices(N);
+	iota(indices.begin(), indices.end(), 0);
 
-section:
-	MPI_Comm_rank(intracomm, &world_rank);
-
-	// cerr << "Now creating graph topology";
-	// MPI_Dist_graph_create_adjacent(intracomm, graph[world_rank].size(), graph[world_rank].data(), MPI_WEIGHTS_EMPTY,
-	// graph[world_rank].size(), graph[world_rank].data(), MPI_WEIGHTS_EMPTY, MPI_INFO_NULL, 0, &new_intracomm);
-	// intracomm = new_intracomm;
-	// cerr << "Graph topology now created.\n";
 	fprintf(stderr, "Process %d Done!\n", world_rank);
 	MPI_Finalize();
-
-	// intracomm now contains the process topology.
 }
