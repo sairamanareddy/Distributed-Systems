@@ -157,7 +157,6 @@ int main(int argc, char *argv[])
 
 
 
-
 	fprintf(stderr, "Process %d Done!\n", world_rank);
 	MPI_File_close(&logfile);
 	MPI_Finalize();
